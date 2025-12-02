@@ -1,0 +1,314 @@
+---
+title: Update Tristan - Implémentation Authentification Supabase
+date: 2025-11-26
+author: Augment Agent
+---
+
+# 🔐 Mise à jour Authentification Kareer
+
+## 📋 Résumé des Modifications
+
+Cette mise à jour remplace le système d'authentification mock par une intégration complète avec Supabase Auth, incluant la gestion des mots de passe temporaires.
+
+---
+
+## 📁 Fichiers Modifiés
+
+### 1. `src/lib/auth.tsx` ✏️ MODIFIÉ
+
+**Objectif**: Remplacer le système mock par Supabase Auth réel
+
+**Changements clés**:
+- ❌ Suppression des `MOCK_USERS` (utilisateurs de démonstration)
+- ❌ Suppression du stockage localStorage manuel
+- ✅ Intégration avec `supabase.auth.signInWithPassword()`
+- ✅ Ajout de `mustChangePassword` dans le contexte
+- ✅ Fonction `updatePassword()` pour changer le mot de passe
+- ✅ Détection automatique du rôle utilisateur via les tables métier
+- ✅ Écoute des événements auth (SIGNED_IN, SIGNED_OUT, USER_UPDATED)
+
+**Nouveau type User**:
+```typescript
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: 'student' | 'coach' | 'admin' | 'school_admin' | 'super_admin';
+  avatarUrl?: string;
+  mustChangePassword?: boolean;
+}
+```
+
+**Nouveau contexte**:
+```typescript
+interface AuthContextType {
+  user: User | null;
+  isLoading: boolean;
+  isAuthenticated: boolean;
+  mustChangePassword: boolean;           // NOUVEAU
+  login: (email, password) => Promise<LoginResult>;
+  logout: () => Promise<void>;
+  checkAuth: () => Promise<boolean>;
+  updatePassword: (newPassword) => Promise<void>;  // NOUVEAU
+  clearMustChangePassword: () => void;   // NOUVEAU
+}
+```
+
+---
+
+### 2. `src/screens/ChangePassword/ChangePassword.tsx` ✅ CRÉÉ
+
+**Objectif**: Page obligatoire de changement de mot de passe temporaire
+
+**Fonctionnalités**:
+- 🔒 Affichage de l'email de l'utilisateur connecté
+- 📊 Indicateur de force du mot de passe (barre de progression)
+- ✅ Liste des exigences du mot de passe avec validation en temps réel:
+  - Au moins 8 caractères
+  - Une majuscule
+  - Une minuscule
+  - Un chiffre
+  - Un caractère spécial
+- 👁️ Toggle visibilité mot de passe
+- ✅ Confirmation que les mots de passe correspondent
+- 🔄 Redirection automatique vers le dashboard après succès
+- 🚪 Option de déconnexion
+
+**Style**: Cohérent avec le design existant (Tailwind CSS, composants UI)
+
+---
+
+### 3. `src/screens/ChangePassword/index.ts` ✅ CRÉÉ
+
+**Objectif**: Export du composant ChangePassword
+
+```typescript
+export { ChangePassword } from './ChangePassword';
+```
+
+---
+
+### 4. `src/screens/LoginPage/LoginPage.tsx` ✏️ MODIFIÉ
+
+**Objectif**: Gérer la redirection vers /change-password
+
+**Changements**:
+- ❌ Suppression du pré-remplissage automatique des champs (mode démo)
+- ❌ Suppression des useEffect qui remplissaient email/password
+- ✅ Vérification de `mustChangePassword` après login
+- ✅ Redirection vers `/change-password` si nécessaire
+- ✅ Gestion des erreurs Supabase spécifiques:
+  - "Invalid login credentials"
+  - "Email not confirmed"
+
+**Nouveau flux de login**:
+```typescript
+const result = await login(email, password);
+
+if (result.mustChangePassword) {
+  navigate('/change-password');  // ← Mot de passe temporaire
+  return;
+}
+
+// Sinon, accès normal au dashboard
+navigate(result.user.role === 'coach' ? '/coach' : '/dashboard');
+```
+
+---
+
+### 5. `src/App.tsx` ✏️ MODIFIÉ
+
+**Objectif**: Ajouter la route /change-password et protéger les routes
+
+**Changements**:
+- ✅ Import de `ChangePassword`
+- ✅ Modification de `ProtectedRoute` pour vérifier `mustChangePassword`
+- ✅ Création de `RequirePasswordChange` (route spéciale)
+- ✅ Ajout de la route `/change-password`
+
+**Nouveau comportement ProtectedRoute**:
+```typescript
+const ProtectedRoute = ({ children }) => {
+  const { isAuthenticated, isLoading, mustChangePassword } = useAuth();
+  
+  if (isLoading) return <Loading />;
+  if (!isAuthenticated && !BYPASS) return <Navigate to="/login" />;
+  
+  // NOUVEAU: Redirection si mot de passe temporaire
+  if (mustChangePassword && !BYPASS) {
+    return <Navigate to="/change-password" />;
+  }
+  
+  return children;
+};
+```
+
+---
+
+## 🔄 Flux Complet d'Authentification
+
+```mermaid
+sequenceDiagram
+    participant U as Utilisateur
+    participant LP as LoginPage
+    participant Auth as AuthContext
+    participant SB as Supabase Auth
+    participant CP as ChangePassword
+    participant DB as Dashboard
+
+    U->>LP: Entre email + mot de passe temporaire
+    LP->>Auth: login(email, password)
+    Auth->>SB: signInWithPassword()
+    SB-->>Auth: { user, session }
+    Auth-->>LP: { user, mustChangePassword: true }
+    
+    alt mustChangePassword = true
+        LP->>CP: navigate('/change-password')
+        U->>CP: Entre nouveau mot de passe
+        CP->>Auth: updatePassword(newPassword)
+        Auth->>SB: updateUser({ password })
+        Auth->>SB: updateUser({ data: { must_change_password: false }})
+        SB-->>Auth: Success
+        CP->>DB: navigate('/dashboard')
+    else mustChangePassword = false
+        LP->>DB: navigate('/dashboard')
+    end
+```
+
+---
+
+## 🛡️ Sécurité
+
+### Exigences Mot de Passe
+| Critère | Valeur |
+|---------|--------|
+| Longueur minimale | 8 caractères |
+| Majuscules | Au moins 1 |
+| Minuscules | Au moins 1 |
+| Chiffres | Au moins 1 |
+| Caractères spéciaux | Au moins 1 (!@#$%^&*...) |
+
+### Protection des Routes
+- Toutes les routes protégées redirigent vers `/change-password` si `mustChangePassword: true`
+- La route `/change-password` nécessite d'être authentifié
+- Impossible d'accéder au dashboard sans avoir changé le mot de passe temporaire
+
+---
+
+## 🗄️ Interaction avec Supabase
+
+### Tables utilisées pour déterminer le rôle
+1. `super_admins` → role: 'super_admin'
+2. `school_admins` → role: 'school_admin'
+3. `coaches` → role: 'coach'
+4. `students` → role: 'student'
+
+### Métadonnées utilisateur (user_metadata)
+```json
+{
+  "account_type": "student",
+  "full_name": "Jean Dupont",
+  "must_change_password": true,
+  "first_login": true,
+  "avatar_url": ""
+}
+```
+
+### Après changement de mot de passe
+```json
+{
+  "must_change_password": false,
+  "first_login": false,
+  "password_changed_at": "2025-11-26T12:00:00.000Z"
+}
+```
+
+---
+
+## ✅ Checklist de Vérification
+
+- [x] auth.tsx utilise Supabase Auth
+- [x] Page /change-password créée
+- [x] LoginPage redirige vers /change-password si nécessaire
+- [x] ProtectedRoute vérifie mustChangePassword
+- [x] Route /change-password ajoutée dans App.tsx
+- [x] Pas de modification du design existant
+- [x] Validation de force du mot de passe
+- [x] Gestion des erreurs Supabase
+
+---
+
+## 🚀 Prochaines Étapes Suggérées
+
+1. **Tester le flux complet**:
+   - Créer un utilisateur via Edge Function `create-user-account`
+   - Se connecter avec le mot de passe temporaire
+   - Vérifier la redirection vers /change-password
+   - Changer le mot de passe
+   - Vérifier l'accès au dashboard
+
+2. **Variables d'environnement requises**:
+   ```env
+   VITE_SUPABASE_URL=https://rnmgjstdnttfljqtvrxu.supabase.co
+   VITE_SUPABASE_ANON_KEY=votre_clé_anon
+   ```
+
+3. **Mode développement** (optionnel):
+   ```env
+   VITE_BYPASS_AUTH=true  # Désactive toutes les protections
+   ```
+
+---
+
+## 🔄 Update 2 - Corrections UX Login
+
+### Problèmes corrigés
+
+| Problème | Solution |
+|----------|----------|
+| Page login affichée alors que déjà connecté | Ajout d'un loader pendant `authLoading` |
+| Bouton "Aller à l'App" redirige vers /login | Changé vers `/dashboard` (route protégée) |
+| Onglets étudiant/coach qui ne servent à rien | Supprimés - formulaire unique |
+
+### Fichiers modifiés (Update 2)
+
+#### `src/components/LandingHeader.tsx`
+- Changé `<Link to="/login">` → `<Link to="/dashboard">`
+- L'utilisateur connecté est redirigé directement vers son dashboard
+- L'utilisateur non connecté est redirigé vers /login par ProtectedRoute
+
+#### `src/screens/LoginPage/LoginPage.tsx`
+- **Ajout loader** : Affiche un spinner pendant que l'auth vérifie la session
+- **Suppression onglets** : Plus de tabs étudiant/coach
+- **Formulaire unique** : Design bleu conservé, un seul formulaire
+- **Suppression `loginOptions`** : Plus besoin de cette configuration
+- **Suppression imports Tabs** : Code nettoyé
+
+### Nouveau flux de login
+
+```
+1. Utilisateur clique "Aller à l'App"
+   ↓
+2. Redirigé vers /dashboard (route protégée)
+   ↓
+3. ProtectedRoute vérifie l'authentification
+   ↓
+4a. Si connecté → Affiche Dashboard
+4b. Si non connecté → Redirige vers /login
+   ↓
+5. LoginPage vérifie authLoading
+   ↓
+6a. Si authLoading=true → Affiche loader
+6b. Si authLoading=false → Affiche formulaire
+```
+
+---
+
+## 📞 Support
+
+Pour toute question sur cette mise à jour, contactez l'équipe technique.
+
+**Fichiers créés**: 2
+**Fichiers modifiés**: 4
+**Lignes de code ajoutées**: ~450
+
